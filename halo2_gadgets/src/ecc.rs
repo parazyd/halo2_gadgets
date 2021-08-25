@@ -451,29 +451,83 @@ impl<C: CurveAffine, EccChip: EccInstructions<C>> FixedPoint<C, EccChip> {
 }
 
 #[cfg(test)]
-mod tests {
-    use group::{prime::PrimeCurveAffine, Curve, Group};
+pub mod tests {
+    use group::{Curve, Group};
+
+    use lazy_static::lazy_static;
+
+    use crate::ecc::{
+        self,
+        chip::{
+            compute_lagrange_coeffs, find_zs_and_us, EccChip, EccConfig, NUM_WINDOWS,
+            NUM_WINDOWS_SHORT,
+        },
+        FixedPoints, H,
+    };
+    use crate::utilities::lookup_range_check::LookupRangeCheckConfig;
 
     use halo2::{
         circuit::{Layouter, SimpleFloorPlanner},
-        dev::MockProver,
         plonk::{Circuit, ConstraintSystem, Error},
     };
     use pasta_curves::pallas;
 
-    use super::chip::{EccChip, EccConfig};
-    use crate::utilities::lookup_range_check::LookupRangeCheckConfig;
-    use crate::constants::OrchardFixedBases;
+    use std::marker::PhantomData;
 
-    struct MyCircuit {}
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    enum FixedBase {
+        FullWidth,
+        Short,
+    }
+
+    lazy_static! {
+        static ref BASE: pallas::Affine = pallas::Point::generator().to_affine();
+        static ref ZS_AND_US: Vec<(u64, [[u8; 32]; H])> =
+            find_zs_and_us(*BASE, NUM_WINDOWS).unwrap();
+        static ref ZS_AND_US_SHORT: Vec<(u64, [[u8; 32]; H])> =
+            find_zs_and_us(*BASE, NUM_WINDOWS_SHORT).unwrap();
+        static ref LAGRANGE_COEFFS: Vec<[pallas::Base; H]> =
+            compute_lagrange_coeffs(*BASE, NUM_WINDOWS);
+        static ref LAGRANGE_COEFFS_SHORT: Vec<[pallas::Base; H]> =
+            compute_lagrange_coeffs(*BASE, NUM_WINDOWS_SHORT);
+    }
+
+    impl FixedPoints<pallas::Affine> for FixedBase {
+        fn generator(&self) -> pallas::Affine {
+            *BASE
+        }
+
+        fn u(&self) -> Vec<[[u8; 32]; H]> {
+            match self {
+                FixedBase::FullWidth => ZS_AND_US.iter().map(|(_, us)| *us).collect(),
+                FixedBase::Short => ZS_AND_US_SHORT.iter().map(|(_, us)| *us).collect(),
+            }
+        }
+
+        fn z(&self) -> Vec<u64> {
+            match self {
+                FixedBase::FullWidth => ZS_AND_US.iter().map(|(z, _)| *z).collect(),
+                FixedBase::Short => ZS_AND_US_SHORT.iter().map(|(z, _)| *z).collect(),
+            }
+        }
+
+        fn lagrange_coeffs(&self) -> Vec<[pallas::Base; H]> {
+            match self {
+                FixedBase::FullWidth => LAGRANGE_COEFFS.to_vec(),
+                FixedBase::Short => LAGRANGE_COEFFS_SHORT.to_vec(),
+            }
+        }
+    }
+
+    pub struct MyCircuit<F: FixedPoints<pallas::Affine>>(pub PhantomData<F>);
 
     #[allow(non_snake_case)]
-    impl Circuit<pallas::Base> for MyCircuit {
+    impl<F: FixedPoints<pallas::Affine>> Circuit<pallas::Base> for MyCircuit<F> {
         type Config = EccConfig;
         type FloorPlanner = SimpleFloorPlanner;
 
         fn without_witnesses(&self) -> Self {
-            MyCircuit {}
+            MyCircuit(PhantomData)
         }
 
         fn configure(meta: &mut ConstraintSystem<pallas::Base>) -> Self::Config {
@@ -505,7 +559,7 @@ mod tests {
             meta.enable_constant(constants);
 
             let range_check = LookupRangeCheckConfig::configure(meta, advices[9], lookup_table);
-            EccChip::<OrchardFixedBases>::configure(meta, advices, lagrange_coeffs, range_check)
+            EccChip::<F>::configure(meta, advices, lagrange_coeffs, range_check)
         }
 
         fn synthesize(
@@ -519,114 +573,40 @@ mod tests {
             // provided by the Sinsemilla chip.
             config.lookup_config.load(&mut layouter)?;
 
-            // Generate a random non-identity point P
-            let p_val = pallas::Point::random(rand::rngs::OsRng).to_affine(); // P
-            let p = super::NonIdentityPoint::new(
+            ecc::chip::witness_point::tests::test_witness_non_id(
                 chip.clone(),
-                layouter.namespace(|| "P"),
-                Some(p_val),
-            )?;
-            let p_neg = -p_val;
-            let p_neg = super::NonIdentityPoint::new(
-                chip.clone(),
-                layouter.namespace(|| "-P"),
-                Some(p_neg),
+                layouter.namespace(|| "witness non-identity point"),
             )?;
 
-            // Generate a random non-identity point Q
-            let q_val = pallas::Point::random(rand::rngs::OsRng).to_affine(); // Q
-            let q = super::NonIdentityPoint::new(
+            ecc::chip::add::tests::test_add(chip.clone(), layouter.namespace(|| "addition"))?;
+
+            ecc::chip::add_incomplete::tests::test_add_incomplete(
                 chip.clone(),
-                layouter.namespace(|| "Q"),
-                Some(q_val),
+                layouter.namespace(|| "incomplete addition"),
             )?;
 
-            // Make sure P and Q are not the same point.
-            assert_ne!(p_val, q_val);
+            ecc::chip::mul::tests::test_mul(
+                chip.clone(),
+                layouter.namespace(|| "variable-base scalar multiplication"),
+            )?;
 
-            // Test that we can witness the identity as a point, but not as a non-identity point.
-            {
-                let _ = super::Point::new(
-                    chip.clone(),
-                    layouter.namespace(|| "identity"),
-                    Some(pallas::Affine::identity()),
-                )?;
+            ecc::chip::mul_fixed::full_width::tests::test_mul_fixed(
+                FixedBase::FullWidth,
+                chip.clone(),
+                layouter.namespace(|| "fixed-base scalar multiplication with full-width scalar"),
+            )?;
 
-                super::NonIdentityPoint::new(
-                    chip.clone(),
-                    layouter.namespace(|| "identity"),
-                    Some(pallas::Affine::identity()),
-                )
-                .expect_err("Trying to witness the identity should return an error");
-            }
+            ecc::chip::mul_fixed::short::tests::test_mul_fixed_short(
+                FixedBase::Short,
+                chip.clone(),
+                layouter.namespace(|| "fixed-base scalar multiplication with short signed scalar"),
+            )?;
 
-            // Test witness non-identity point
-            {
-                super::chip::witness_point::tests::test_witness_non_id(
-                    chip.clone(),
-                    layouter.namespace(|| "witness non-identity point"),
-                )
-            }
-
-            // Test complete addition
-            {
-                super::chip::add::tests::test_add(
-                    chip.clone(),
-                    layouter.namespace(|| "complete addition"),
-                    p_val,
-                    &p,
-                    q_val,
-                    &q,
-                    &p_neg,
-                )?;
-            }
-
-            // Test incomplete addition
-            {
-                super::chip::add_incomplete::tests::test_add_incomplete(
-                    chip.clone(),
-                    layouter.namespace(|| "incomplete addition"),
-                    p_val,
-                    &p,
-                    q_val,
-                    &q,
-                    &p_neg,
-                )?;
-            }
-
-            // Test variable-base scalar multiplication
-            {
-                super::chip::mul::tests::test_mul(
-                    chip.clone(),
-                    layouter.namespace(|| "variable-base scalar mul"),
-                    &p,
-                    p_val,
-                )?;
-            }
-
-            // Test full-width fixed-base scalar multiplication
-            {
-                super::chip::mul_fixed::full_width::tests::test_mul_fixed(
-                    chip.clone(),
-                    layouter.namespace(|| "full-width fixed-base scalar mul"),
-                )?;
-            }
-
-            // Test signed short fixed-base scalar multiplication
-            {
-                super::chip::mul_fixed::short::tests::test_mul_fixed_short(
-                    chip.clone(),
-                    layouter.namespace(|| "signed short fixed-base scalar mul"),
-                )?;
-            }
-
-            // Test fixed-base scalar multiplication with a base field element
-            {
-                super::chip::mul_fixed::base_field_elem::tests::test_mul_fixed_base_field(
-                    chip,
-                    layouter.namespace(|| "fixed-base scalar mul with base field element"),
-                )?;
-            }
+            ecc::chip::mul_fixed::base_field_elem::tests::test_mul_fixed_base_field(
+                FixedBase::FullWidth,
+                chip.clone(),
+                layouter.namespace(|| "fixed-base scalar multiplication with base field element"),
+            )?;
 
             Ok(())
         }
@@ -634,8 +614,10 @@ mod tests {
 
     #[test]
     fn ecc_chip() {
+        use halo2::dev::MockProver;
+
         let k = 13;
-        let circuit = MyCircuit {};
+        let circuit = MyCircuit::<FixedBase>(std::marker::PhantomData);
         let prover = MockProver::run(k, &circuit, vec![]).unwrap();
         assert_eq!(prover.verify(), Ok(()))
     }
@@ -649,7 +631,7 @@ mod tests {
         root.fill(&WHITE).unwrap();
         let root = root.titled("Ecc Chip Layout", ("sans-serif", 60)).unwrap();
 
-        let circuit = MyCircuit {};
+        let circuit = MyCircuit::<FixedBase>(std::marker::PhantomData);
         halo2::dev::CircuitLayout::default()
             .render(13, &circuit, &root)
             .unwrap();
