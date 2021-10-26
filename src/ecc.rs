@@ -604,7 +604,7 @@ pub mod tests {
 
             ecc::chip::mul_fixed::base_field_elem::tests::test_mul_fixed_base_field(
                 FixedBase::FullWidth,
-                chip.clone(),
+                chip,
                 layouter.namespace(|| "fixed-base scalar multiplication with base field element"),
             )?;
 

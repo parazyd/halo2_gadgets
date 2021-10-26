@@ -619,7 +619,7 @@ pub mod tests {
 
             // Test commit domain.
             {
-                let chip2 = SinsemillaChip::construct(config.2.clone());
+                let chip2 = SinsemillaChip::construct(config.2);
 
                 let domain = Commit;
                 let commit_domain = CommitDomain::new(chip2.clone(), ecc_chip.clone(), &domain);
@@ -655,7 +655,7 @@ pub mod tests {
                     };
 
                     NonIdentityPoint::new(
-                        ecc_chip.clone(),
+                        ecc_chip,
                         layouter.namespace(|| "Witness expected result"),
                         expected_result,
                     )?

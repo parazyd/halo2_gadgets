@@ -1,4 +1,4 @@
-# orchard [![Crates.io](https://img.shields.io/crates/v/orchard.svg)](https://crates.io/crates/orchard) #
+# halo2_gadgets [![Crates.io](https://img.shields.io/crates/v/halo2_gadgets.svg)](https://crates.io/crates/halo2_gadgets) #
 
 **IMPORTANT**: This library is being actively developed and should not be used in production software.
 
