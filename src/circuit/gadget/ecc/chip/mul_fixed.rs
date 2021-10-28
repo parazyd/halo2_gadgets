@@ -200,7 +200,10 @@ impl<Fixed: FixedPoints<pallas::Affine>, const NUM_WINDOWS: usize> Config<Fixed,
         coords_check_toggle: Selector,
     ) -> Result<(), Error> {
         let lagrange_coeffs = base.lagrange_coeffs();
+        assert_eq!(lagrange_coeffs.len(), NUM_WINDOWS);
+
         let z = base.z();
+        assert_eq!(z.len(), NUM_WINDOWS);
 
         // Assign fixed columns for given fixed base
         for window in 0..NUM_WINDOWS {
@@ -244,6 +247,7 @@ impl<Fixed: FixedPoints<pallas::Affine>, const NUM_WINDOWS: usize> Config<Fixed,
     ) -> Result<NonIdentityEccPoint, Error> {
         let base_value = base.generator();
         let base_u = base.u();
+        assert_eq!(base_u.len(), NUM_WINDOWS);
 
         // Compute [(k_w + 2) ⋅ 8^w]B
         let mul_b = {
